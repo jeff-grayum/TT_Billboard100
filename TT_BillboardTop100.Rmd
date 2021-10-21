@@ -1,0 +1,237 @@
+---
+title: "BillboardTop100"
+author: "Jeff Grayum"
+date: "9/26/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+library(scales)
+library(ggthemes)
+library(lubridate)
+library(tidymodels)
+library(textrecipes)
+doParallel::registerDoParallel(cores = 8)
+```
+
+Lodading datset
+```{r}
+tuesdata <- tidytuesdayR::tt_load('2021-09-14')
+
+
+billboard <- tuesdata$billboard %>%
+  mutate(week = mdy(week_id)) %>%
+  select(-week_id)
+
+audio_features <- tuesdata$audio_features
+
+audio_features %>%
+  view()
+
+billboard %>%
+  view()
+
+```
+
+```{r}
+top_9_songs <- billboard %>%
+  filter(week_position == 1) %>%
+  count(song, performer, sort = TRUE) %>%
+  head(9) %>%
+  pull(song)
+
+longest_number_1 <- billboard %>%
+  filter(week_position == 1) %>%
+  count(song_id, song, performer, sort = TRUE)
+
+billboard %>%
+  filter(song == "Old Town Road") %>%
+  ggplot(aes(week, week_position)) +
+  geom_line() +
+  scale_y_reverse() +
+  labs(x = "Week",
+       y = "Top 100 Position",
+       title = "Billboard Top 100: Old Town Road") +
+  theme_few()
+
+billboard %>%
+  filter(song %in% top_9_songs) %>%
+  ggplot(aes(week, week_position)) +
+  geom_line() +
+  scale_y_reverse() +
+  labs(x = "Week",
+       y = "Top 100 Position",
+       title = "Billboard Top 100: Top 10 Songs") +
+  theme_few() +
+  facet_wrap(~ song) 
+  
+billboard %>%
+  semi_join(head(longest_number_1, 9), by = "song_id") %>%
+  ggplot(aes(week, week_position, group = instance)) +
+  geom_line() +
+  facet_wrap(~ song, scales = "free_x") +
+  scale_y_reverse() +
+  labs(x = "Time",
+       y = "Billboard position",
+       title = "What are the trajectories of #1 hits") +
+  theme_hc()
+
+by_performer <- billboard %>%
+  group_by(performer) %>%
+  summarize(total_weeks_on_top_100 = n(),
+            total_weeks_at_number_1 = sum(week_position == 1),
+            n_songs_on_top_100 = n_distinct(song),
+            n_songs_at_number_1 = n_distinct(song[week_position == 1])) %>%
+  arrange(desc(n_songs_at_number_1))
+
+
+by_performer %>%
+  arrange(desc(n_songs_on_top_100)) %>%
+  head(30) %>%
+  mutate(performer = fct_reorder(performer, n_songs_on_top_100)) %>%
+  ggplot(aes(n_songs_on_top_100, performer, fill = performer)) +
+  geom_col() +
+  labs(x = "# Songs on Billboard Top 100",
+       y = "Performer",
+       title = "Most charted artists") +
+  theme_tufte() +
+theme(legend.position = "null") 
+
+by_performer %>%
+  arrange(desc(n_songs_at_number_1)) %>%
+  head(30) %>%
+  mutate(performer = fct_reorder(performer, n_songs_at_number_1)) %>%
+  ggplot(aes(n_songs_at_number_1, performer, fill = performer)) +
+  geom_col() +
+  labs(x = "# of Top Songs on Billboard Top 100",
+       y = "Performer",
+       title = "Most #1 Songs") +
+  theme_tufte() +
+theme(legend.position = "null") 
+
+```
+
+```{r}
+billboard %>%
+  arrange(desc(week)) %>%
+  select(week)
+```
+
+
+```{r}
+by_performer %>%
+  arrange(desc(n_songs_on_top_100)) %>%
+  mutate(performer = fct_reorder(performer, n_songs_at_number_1)) %>%
+  ggplot(aes(n_songs_on_top_100, n_songs_at_number_1)) +
+  geom_point() +
+  labs(x = "# of Top Songs on Billboard Top 100",
+       y = "# Songs at number 1",
+       title = "") +
+  theme_tufte() +
+  geom_text(aes(label = performer), check_overlap = TRUE, vjust = 1, hjust = 1) +
+  expand_limits(x = 0)
+```
+
+
+```{r}
+summarize_songs <- function(tbl) {
+  tbl %>%
+    summarize(total_weeks_on_top_100 = n(),
+            total_weeks_at_number_1 = sum(week_position == 1),
+            n_songs_on_top_100 = n_distinct(song),
+            n_songs_at_number_1 = n_distinct(song[week_position == 1]),
+            .groups = "drop") %>%
+  arrange(desc(n_songs_at_number_1))
+}
+
+by_performer_decade <- billboard %>%
+  group_by(performer,
+           decade = ((year(week) %/% 10)) * 10) %>%
+  summarize_songs()
+
+by_performer_decade %>%
+  group_by(decade) %>%
+  slice_max(total_weeks_on_top_100, n = 1)
+
+by_performer_decade %>%
+  group_by(decade) %>%
+  slice_max(total_weeks_at_number_1, n = 1)
+
+billboard %>%
+  mutate(performer_lumped = fct_lump(performer, 16)) %>%
+  count(performer_lumped,
+        year = (year(week) %/% 5) * 5) %>%
+  filter(performer_lumped != "Other") %>%
+  ggplot(aes(year, n / 5, fill = performer_lumped)) +
+  geom_area() +
+  theme_tufte() +
+  labs(x = "Year",
+       y = "",
+       fill = "",
+       title = "Biggest performers throughout time") +
+  facet_wrap(~ performer_lumped, scales = "free_y") +
+  theme(legend.position = "none")
+```
+
+Machine learning to predict each songs popularity! Task: predict the log number of weeks
+```{r}
+by_song <- billboard %>%
+  group_by(song_id) %>%
+  summarize(peak = max(week_position),
+            n_weeks = n(),
+            week_started_chart = min(week),
+            log_n_weeks = log2(n_weeks))
+
+songs_joined <- by_song %>%
+  inner_join(tuesdata$audio_features, by = "song_id") %>%
+  filter(!is.na(spotify_track_id))
+
+songs_joined %>%
+  view()
+
+#set seed, split, train, test, fold!
+set.seed(2021)
+
+spl <- initial_split(songs_joined)
+
+train <- training(spl)
+
+test <- testing(spl)
+
+folds <- vfold_cv(train, 3)
+```
+
+
+Let's fit an xgboost!
+```{r}
+#preprocessing recipe!
+xg_wf <- recipe(log_n_weeks ~ danceability + energy + key + loudness + mode + speechiness + acousticness + instrumentalness + liveness + valence + tempo + time_signature + spotify_genre + week_started_chart, data = train) %>%
+  step_mutate(month = month(week_started_chart),
+              spotify_genre = str_remove_all(spotify_genre, "\\['|'\\]")) %>%
+  step_rm(week_started_chart) %>%
+  step_tokenize(spotify_genre, token = "regex", options = list(pattern = "', '")) %>%
+  step_tokenfilter(spotify_genre, max_tokens = 5) %>%
+  step_tf(spotify_genre) %>%
+  workflow(boost_tree("regression",
+                      mtry = tune(),
+                      trees = tune(),
+                      learn_rate = .02))
+
+
+tune <- xg_wf %>%
+  tune_grid(folds,
+            metrics = metric_set(rmse),
+            grid = crossing(mtry = c(2, 4, 6),
+                            trees = seq(50, 500, 50)))
+  
+```
+
